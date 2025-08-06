@@ -1,86 +1,68 @@
-import requests
-import random
-import string
-import time
+import requests, random, string, time
+from bs4 import BeautifulSoup
 
-def random_string(length=10):
-    return ''.join(random.choices(string.ascii_lowercase + string.digits, k=length))
+def random_str(n=8):
+    return ''.join(random.choices(string.ascii_lowercase + string.digits, k=n))
 
 def create_temp_email():
-    domain = requests.get("https://api.mail.tm/domains").json()["hydra:member"][0]["domain"]
-    username = random_string()
-    email = f"{username}@{domain}"
-    password = random_string(12)
-    
-    res = requests.post("https://api.mail.tm/accounts", json={
-        "address": email,
-        "password": password
+    r1 = requests.get("https://api.mail.tm/domains")
+    domain = r1.json()["hydra:member"][0]["domain"]
+    user = random_str(10)
+    email = f"{user}@{domain}"
+    passwd = random_str(12)
+    acc = requests.post("https://api.mail.tm/accounts", json={"address":email,"password":passwd})
+    acc.raise_for_status()
+    tok = requests.post("https://api.mail.tm/token", json={"address":email,"password":passwd})
+    tok.raise_for_status()
+    return email, passwd, tok.json()["token"]
+
+def register_garena(email, garena_pass):
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0",
     })
-
-    if res.status_code != 201:
-        print("Tạo email thất bại:", res.text)
-        return None, None, None
-    
-    token_res = requests.post("https://api.mail.tm/token", json={
-        "address": email,
-        "password": password
-    }).json()
-
-    token = token_res["token"]
-    return email, password, token
-
-def create_garena_account(email, password):
-    # Đây chỉ là ví dụ. API đăng ký Garena không công khai, cần giả lập HTTP request
-    headers = {
-        'User-Agent': 'Mozilla/5.0',
-        'Content-Type': 'application/json'
-    }
+    # 1. Truy cập trang để lấy cookie và CSRF token
+    r = session.get("https://sso.garena.com/universal/register?locale=en")
+    soup = BeautifulSoup(r.text, "html.parser")
+    token_input = soup.select_one("input[name=csrf_token]")
+    csrf = token_input["value"] if token_input else None
 
     payload = {
         "email": email,
-        "password": password,
-        "username": email.split('@')[0],
-        "region": "VN"
+        "password": garena_pass,
+        "username": email.split("@")[0],
+        "csrf_token": csrf,
+        # thêm các trường region, timezone nếu bắt buộc
     }
 
-    print(">>> Đang gửi yêu cầu đăng ký đến Garena...")
-    # Giả lập gửi request (không phải API chính thức)
-    res = requests.post("https://dummy.garena.api/register", json=payload, headers=headers)
+    post = session.post("https://sso.garena.com/universal/register?locale=en", data=payload)
+    return post.status_code, post.text
 
-    print(">>> Phản hồi từ Garena (mô phỏng):", res.text)
-
-def wait_for_email(token):
-    print(">>> Đang chờ email xác nhận...")
-    headers = {
-        "Authorization": f"Bearer {token}"
-    }
-
-    for i in range(30):
+def wait_email(token):
+    headers = {"Authorization": f"Bearer {token}"}
+    for _ in range(30):
         inbox = requests.get("https://api.mail.tm/messages", headers=headers).json()
-        if inbox["hydra:totalItems"] > 0:
-            msg_id = inbox["hydra:member"][0]["id"]
-            msg = requests.get(f"https://api.mail.tm/messages/{msg_id}", headers=headers).json()
-            print(">>> Đã nhận được email:")
-            print("Tiêu đề:", msg["subject"])
-            print("Nội dung:", msg["text"])
-            return
+        if inbox.get("hydra:totalItems",0) > 0:
+            msg = requests.get(f"https://api.mail.tm/messages/{inbox['hydra:member'][0]['id']}", headers=headers).json()
+            return msg.get("text") or msg.get("html")
         time.sleep(2)
-    print(">>> Không nhận được email xác nhận sau 60s.")
+    return None
 
 def main():
     email, email_pass, token = create_temp_email()
-    if not email:
-        return
-    garena_pass = random_string(10)
+    garena_pass = random_str(10)
+    print("Email:", email, "Email pass:", email_pass)
+    print("Garena pass:", garena_pass)
+    status, resp = register_garena(email, garena_pass)
+    print("Status:", status)
+    if "captcha" in resp.lower():
+        print("⚠️ Có khả năng hệ thống yêu cầu CAPTCHA.")
+    print("Đang chờ email xác nhận...")
+    content = wait_email(token)
+    if content:
+        print("Email xác nhận đến, nội dung:", content)
+    else:
+        print("Không nhận được email.")
 
-    print("===================================")
-    print("Email:", email)
-    print("Pass Email:", email_pass)
-    print("Pass Garena:", garena_pass)
-    print("===================================")
-
-    create_garena_account(email, garena_pass)
-    wait_for_email(token)
-
-if __name__ == "__main__":
+if __name__=="__main__":
     main()
