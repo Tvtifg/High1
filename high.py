@@ -1,68 +1,81 @@
-import requests, random, string, time
-from bs4 import BeautifulSoup
+import asyncio
+import random
+import string
+import time
+import requests
+import json
+from playwright.async_api import async_playwright
 
-def random_str(n=8):
-    return ''.join(random.choices(string.ascii_lowercase + string.digits, k=n))
+MAIL_TM_API = "https://api.mail.tm"
 
 def create_temp_email():
-    r1 = requests.get("https://api.mail.tm/domains")
-    domain = r1.json()["hydra:member"][0]["domain"]
-    user = random_str(10)
-    email = f"{user}@{domain}"
-    passwd = random_str(12)
-    acc = requests.post("https://api.mail.tm/accounts", json={"address":email,"password":passwd})
-    acc.raise_for_status()
-    tok = requests.post("https://api.mail.tm/token", json={"address":email,"password":passwd})
-    tok.raise_for_status()
-    return email, passwd, tok.json()["token"]
+    domain = requests.get(f"{MAIL_TM_API}/domains").json()["hydra:member"][0]["domain"]
+    username = ''.join(random.choices(string.ascii_lowercase + string.digits, k=10))
+    password = ''.join(random.choices(string.ascii_letters + string.digits, k=12))
+    email_address = f"{username}@{domain}"
 
-def register_garena(email, garena_pass):
-    session = requests.Session()
-    session.headers.update({
-        "User-Agent": "Mozilla/5.0",
-    })
-    # 1. Truy cập trang để lấy cookie và CSRF token
-    r = session.get("https://sso.garena.com/universal/register?locale=en")
-    soup = BeautifulSoup(r.text, "html.parser")
-    token_input = soup.select_one("input[name=csrf_token]")
-    csrf = token_input["value"] if token_input else None
+    register = requests.post(f"{MAIL_TM_API}/accounts", json={"address": email_address, "password": password})
+    if register.status_code != 201:
+        raise Exception("Failed to create mail.tm account")
 
-    payload = {
-        "email": email,
-        "password": garena_pass,
-        "username": email.split("@")[0],
-        "csrf_token": csrf,
-        # thêm các trường region, timezone nếu bắt buộc
-    }
+    token_res = requests.post(f"{MAIL_TM_API}/token", json={"address": email_address, "password": password})
+    token = token_res.json()["token"]
+    return email_address, password, token
 
-    post = session.post("https://sso.garena.com/universal/register?locale=en", data=payload)
-    return post.status_code, post.text
-
-def wait_email(token):
+def get_verification_code(token):
     headers = {"Authorization": f"Bearer {token}"}
-    for _ in range(30):
-        inbox = requests.get("https://api.mail.tm/messages", headers=headers).json()
-        if inbox.get("hydra:totalItems",0) > 0:
-            msg = requests.get(f"https://api.mail.tm/messages/{inbox['hydra:member'][0]['id']}", headers=headers).json()
-            return msg.get("text") or msg.get("html")
+    timeout = time.time() + 60
+    while time.time() < timeout:
+        resp = requests.get(f"{MAIL_TM_API}/messages", headers=headers)
+        messages = resp.json()["hydra:member"]
+        for msg in messages:
+            if "Garena" in msg["from"]["address"]:
+                full_msg = requests.get(f"{MAIL_TM_API}/messages/{msg['id']}", headers=headers).json()
+                code = "".join(filter(str.isdigit, full_msg["text"]))
+                if len(code) == 6:
+                    return code
         time.sleep(2)
-    return None
+    raise Exception("Verification code not received")
 
-def main():
+async def main():
     email, email_pass, token = create_temp_email()
-    garena_pass = random_str(10)
-    print("Email:", email, "Email pass:", email_pass)
-    print("Garena pass:", garena_pass)
-    status, resp = register_garena(email, garena_pass)
-    print("Status:", status)
-    if "captcha" in resp.lower():
-        print("⚠️ Có khả năng hệ thống yêu cầu CAPTCHA.")
-    print("Đang chờ email xác nhận...")
-    content = wait_email(token)
-    if content:
-        print("Email xác nhận đến, nội dung:", content)
-    else:
-        print("Không nhận được email.")
+    username = "user" + ''.join(random.choices(string.digits, k=5))
+    password = ''.join(random.choices(string.ascii_letters + string.digits, k=10))
 
-if __name__=="__main__":
-    main()
+    print(f"Tạo email: {email}")
+    print("Đang mở trình duyệt...")
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page()
+        await page.goto("https://sso.garena.com/universal/register")
+
+        # Nhập email và gửi mã xác nhận
+        await page.fill('input[name="email"]', email)
+        await page.click("text=Send Code")
+        print("Đã gửi yêu cầu gửi mã xác nhận")
+
+        # Chờ mã gửi về mail.tm
+        print("Đang đợi mã xác nhận...")
+        code = get_verification_code(token)
+        print(f"Mã xác nhận: {code}")
+
+        await page.fill('input[name="email_code"]', code)
+        await page.fill('input[name="username"]', username)
+        await page.fill('input[name="password"]', password)
+        await page.fill('input[name="confirm_password"]', password)
+
+        await page.click("text=Register")
+        await page.wait_for_timeout(5000)
+
+        if "register/success" in page.url:
+            print("✅ Tạo tài khoản thành công!")
+            with open("accounts.txt", "a") as f:
+                f.write(f"{email}|{email_pass} | {username}|{password}\n")
+            print(f"Email: {email}\nUser: {username}\nPass: {password}")
+        else:
+            print("❌ Tạo tài khoản thất bại!")
+
+        await browser.close()
+
+asyncio.run(main())
