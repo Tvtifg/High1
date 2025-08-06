@@ -49,18 +49,14 @@ async def main():
         page = await context.new_page()
 
         await page.goto("https://sso.garena.com/universal/register?locale=en-US")
-        
-         await page.fill('input[name="username"]', username)
-          
+
+        # Nhập thông tin đăng ký
+        await page.fill('input[name="username"]', username)
         await page.fill('input[name="password"]', password)
-        
         await page.fill('input[name="confirm_password"]', password)
-        
-        # Nhập email
         await page.fill('input[name="email"]', email)
-        
         await page.fill('input[name="confirm_password"]', password)
-        # Chờ nút GET CODE hiện ra
+        # Gửi mã xác minh
         try:
             await page.wait_for_selector("text=GET CODE", timeout=10000)
             await page.click("text=GET CODE")
@@ -70,17 +66,16 @@ async def main():
             await browser.close()
             return
 
-        # Lấy mã xác nhận
+        # Nhận mã xác nhận
         print("⌛ Đợi mã xác nhận từ email...")
         code = get_verification_code(token)
         print(f"✅ Mã xác nhận: {code}")
 
-        
+        # Điền mã và hoàn tất đăng ký
         await page.fill('input[name="email_code"]', code)
+        await page.locator('button:has-text("Register Now")').click()
 
-     #   await page.click("text=Register Now")
-         await page.locator('button:has-text("Register Now")').click()
-        # Đợi đăng ký hoàn tất
+        # Đợi phản hồi từ trang
         await page.wait_for_timeout(5000)
         if "success" in page.url:
             print("🎉 Tạo tài khoản thành công!")
